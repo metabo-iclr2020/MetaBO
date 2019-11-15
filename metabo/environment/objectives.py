@@ -234,7 +234,7 @@ class SparseSpectrumGP:
     Note: This approximation assumes that we use a GP with squared exponential kernel.
     """
 
-    def __init__(self, input_dim, seed, noise_var=1.0, length_scale=1.0, signal_var=1.0, n_features=100):
+    def __init__(self, input_dim, seed, noise_var=1.0, length_scale=1.0, signal_var=1.0, n_features=100, kernel="RBF"):
         self.seed = seed
         self.rng = np.random.RandomState()
         self.rng.seed(self.seed)
@@ -244,6 +244,8 @@ class SparseSpectrumGP:
         self.length_scale = length_scale
         self.signal_var = signal_var
         self.n_features = n_features
+        self.kernel = kernel
+        assert kernel == "RBF" or kernel == "Matern32" or kernel == "Matern52"
         self.phi = self._compute_phi()
         self.jitter = 1e-10
 
@@ -292,7 +294,12 @@ class SparseSpectrumGP:
         """
         Compute random features.
         """
-        w = self.rng.randn(self.n_features, self.input_dim) / self.length_scale
+        if self.kernel == "RBF":
+            w = self.rng.randn(self.n_features, self.input_dim) / self.length_scale
+        elif self.kernel == "Matern32":
+            w = self.rng.standard_t(3, (self.n_features, self.input_dim)) / self.length_scale
+        elif self.kernel == "Matern52":
+            w = self.rng.standard_t(5, (self.n_features, self.input_dim)) / self.length_scale
         b = self.rng.uniform(0, 2 * np.pi, size=self.n_features)
         return lambda x: np.sqrt(2 * self.signal_var / self.n_features) * np.cos(x @ w.T + b)
 
@@ -321,3 +328,74 @@ def hpo_max_min(data, dataset):
 
 def get_hpo_domain(data, dataset):
     return data[dataset]["X"]
+
+
+# Rhino-function
+def rhino(x):
+    def bump(x, mu, sigma):
+        return np.exp(-1 / 2 * (x - mu) ** 2 / sigma ** 2)
+
+    bump1 = bump(x, mu=0.3, sigma=0.1)
+    bump2 = bump(x, mu=0.7, sigma=0.01)
+    rhino = 0.5 * bump1 + 3.0 * bump2
+
+    return rhino
+
+
+def rhino_max_min():
+    max_pos = np.array(0.7).reshape(1, 1)
+    min_pos = np.array(1.0).reshape(1, 1)
+    max = rhino(max_pos)
+    min = rhino(min_pos)
+
+    return max_pos, max, min_pos, min
+
+
+def rhino_translated(x, t):
+    x_new = x.copy()
+    # apply translation
+    # clip the translations s.t. both maxima stay well in domain
+    t_range = np.array([[-0.25, 0.25]])
+    t = np.clip(t, t_range[:, 0], t_range[:, 1])
+    x_new = x_new - t
+
+    return rhino(x_new)
+
+
+def rhino_max_min_translated(t):
+    max_pos, max, min_pos, min = rhino_max_min()
+
+    # apply translation
+    t_range = np.array([[-0.25, 0.25]])
+    t = np.clip(t, t_range[:, 0], t_range[:, 1])
+
+    max_pos = max_pos + t
+    min_pos = min_pos + t
+
+    return max_pos, max, min_pos, min
+
+
+# Rhino2-function
+def rhino2(x, h):
+    assert .5 <= h <= 1.0
+
+    def bump(x, mu, sigma):
+        return np.exp(-1 / 2 * (x - mu) ** 2 / sigma ** 2)
+
+    # bump1 = bump(x, mu=0.2, sigma=0.05)
+    bump1 = bump(x, mu=0.2, sigma=0.1)
+    # bump2 = bump(x, mu=h, sigma=0.03)
+    bump2 = bump(x, mu=h, sigma=0.01)
+    rhino = h * bump1 + 2 * bump2
+    rhino = rhino - 1.0
+
+    return rhino
+
+
+def rhino2_max_min(h):
+    max_pos = np.array(h).reshape(1, 1)
+    min_pos = np.array(0.0).reshape(1, 1)
+    max = rhino2(max_pos, h)
+    min = rhino2(min_pos, h)
+
+    return max_pos, max, min_pos, min

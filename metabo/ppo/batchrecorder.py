@@ -77,6 +77,7 @@ class EnvRunner(mp.Process):
 
     def record_batch(self, gamma, lam):
         if self.next_state is None:
+            self.pi.reset()
             state = self.env.reset()
             new = 1
         else:
@@ -90,6 +91,7 @@ class EnvRunner(mp.Process):
             self.push(state, action, reward, value, new)
 
             if done:
+                self.pi.reset()
                 state = self.env.reset()
                 new = 1
             else:

@@ -18,9 +18,11 @@ import json
 from metabo.environment.util import create_uniform_grid, scale_from_unit_square_to_domain, \
     scale_from_domain_to_unit_square, get_cube_around
 from metabo.environment.objectives import SparseSpectrumGP, bra_var, bra_max_min_var, gprice_var, gprice_max_min_var, \
-    hm3_var, hm3_max_min_var, hpo, hpo_max_min, get_hpo_domain
+    hm3_var, hm3_max_min_var, hpo, hpo_max_min, get_hpo_domain, rhino_translated, rhino_max_min_translated, \
+    rhino2, rhino2_max_min
 from metabo.environment.furuta import init_furuta_simulation, furuta_simulation
-
+from matplotlib import pyplot as plt
+import os
 
 class MetaBO(gym.Env):
     def __init__(self, **kwargs):
@@ -74,12 +76,16 @@ class MetaBO(gym.Env):
             self.af_max_search_diam = 2 * 1 / N_MS_per_dim
         else:
             self.discrete_domain = True
-            self.xi_t = None  # will be set for once for each new function
+            # self.xi_t = None  # will be set for each new function
             self.cardinality_xi_t = kwargs["cardinality_domain"]
+            self.xi_t = sobol_seq.i4_sobol_generate(self.D, self.cardinality_xi_t)
 
         # the features
         self.features = kwargs["features"]
         self.feature_order_eval_envs = ["posterior_mean", "posterior_std", "incumbent", "timestep"]
+        self.feature_order_eps_greedy = ["posterior_mean", "posterior_std"] + \
+                                        ["x"] * self.D + ["incumbent", "timestep", "budget"]
+        self.feature_order_gmm_ucb = ["posterior_mean", "posterior_std"] + ["x"] * self.D + ["timestep", "budget"]
 
         # observation space
         self.n_features = 0
@@ -92,6 +98,8 @@ class MetaBO(gym.Env):
         if "budget" in self.features:
             self.n_features += 1
         if "incumbent" in self.features:
+            self.n_features += 1
+        if "timestep_perc" in self.features:
             self.n_features += 1
         if "timestep" in self.features:
             self.n_features += 1
@@ -138,6 +146,9 @@ class MetaBO(gym.Env):
         self.rng = None
         self.seeded_with = None
 
+        # plot count
+        self.plot_count = 0
+
     def seed(self, seed=None):
         # sets up the environment-internal random number generator and seeds it with seed
         self.rng = np.random.RandomState()
@@ -165,6 +176,10 @@ class MetaBO(gym.Env):
         # optimize the AF
         self.optimize_AF()
 
+        # plot
+        if self.kwargs.get("plot"):
+            self.plot()
+
         return self.get_state(self.xi_t)
 
     def step(self, action):
@@ -184,6 +199,8 @@ class MetaBO(gym.Env):
         reward = self.get_reward()
         self.update_gp()  # do this AFTER calling get_reward()
         self.optimize_AF()
+        if self.kwargs.get("plot"):
+            self.plot()
         next_state = self.get_state(self.xi_t)
         done = self.is_terminal()
 
@@ -211,8 +228,9 @@ class MetaBO(gym.Env):
                                          high=self.f_opts["noise_var_high"])
             signal_var = self.rng.uniform(low=self.f_opts["signal_var_low"],
                                           high=self.f_opts["signal_var_high"])
+            kernel = self.f_opts["kernel"] if "kernel" in self.f_opts else "RBF"
             ssgp = SparseSpectrumGP(seed=seed, input_dim=self.D, noise_var=noise_var, length_scale=lengthscale,
-                                    signal_var=signal_var, n_features=n_features)
+                                    signal_var=signal_var, n_features=n_features, kernel=kernel)
             x_train = np.array([]).reshape(0, self.D)
             y_train = np.array([]).reshape(0, 1)
             ssgp.train(x_train, y_train, n_samples=1)
@@ -223,14 +241,20 @@ class MetaBO(gym.Env):
             self.kernel_variance = signal_var
             self.noise_variance = 1e-20
 
-            # determine approximate maximum
-            N_samples_dim = np.ceil(1000 ** (1 / self.D))
-            assert N_samples_dim > 3
-            x_vec, _ = create_uniform_grid(self.domain, N_samples_dim=N_samples_dim)
+            if self.do_local_af_opt:
+                # determine approximate maximum
+                N_samples_dim = np.ceil(1000 ** (1 / self.D))
+                assert N_samples_dim > 3
+                x_vec, _ = create_uniform_grid(self.domain, N_samples_dim=N_samples_dim)
+            else:
+                # determine true maximum on grid
+                x_vec = self.xi_t
             y_vec = self.f(x_vec)
             self.x_max = x_vec[np.argmax(y_vec)].reshape(1, self.D)
             self.y_max = np.max(y_vec)
             self.y_min = np.min(y_vec)
+
+            self.f = lambda x: ssgp.sample_posterior_handle(x).reshape(-1, 1) - self.f_opts["min_regret"]
         elif self.f_type == "BRA-var":
             # the branin function with translations and scalings
             if "M" in self.f_opts and self.f_opts["M"] is not None:
@@ -249,12 +273,27 @@ class MetaBO(gym.Env):
                 t = fct_params_grid[param_idx, 0:2]
                 s = fct_params_grid[param_idx, 2]
             else:
-                # sample translation
-                t = self.rng.uniform(low=-self.f_opts["bound_translation"],
-                                     high=self.f_opts["bound_translation"], size=(1, 2))
+                if "bound_translation" in self.f_opts:
+                    # sample translation
+                    t = self.rng.uniform(low=-self.f_opts["bound_translation"],
+                                         high=self.f_opts["bound_translation"], size=(1, 2))
 
-                # sample scaling
-                s = self.rng.uniform(low=1 - self.f_opts["bound_scaling"], high=1 + self.f_opts["bound_scaling"])
+                    # sample scaling
+                    s = self.rng.uniform(low=1 - self.f_opts["bound_scaling"], high=1 + self.f_opts["bound_scaling"])
+                elif "translation_min" in self.f_opts:
+                    # sample translation
+                    t = self.rng.uniform(low=self.f_opts["translation_min"],
+                                         high=self.f_opts["translation_max"], size=(1, 2))
+                    # sample signs of translation
+                    for i in range(t.shape[1]):
+                        coin = self.rng.uniform(low=0.0, high=1.0)
+                        if coin > 0.5:
+                            t[0, i] = -t[0, i]
+
+                    # sample scaling
+                    s = self.rng.uniform(low=self.f_opts["scaling_min"], high=self.f_opts["scaling_max"])
+                else:
+                    raise ValueError("Missspecified translation/scaling parameters!")
 
             self.f = lambda x: bra_var(x, t=t, s=s)
 
@@ -280,12 +319,27 @@ class MetaBO(gym.Env):
                 t = fct_params_grid[param_idx, 0:2]
                 s = fct_params_grid[param_idx, 2]
             else:
-                # sample translation
-                t = self.rng.uniform(low=-self.f_opts["bound_translation"],
-                                     high=self.f_opts["bound_translation"], size=(1, 2))
+                if "bound_translation" in self.f_opts:
+                    # sample translation
+                    t = self.rng.uniform(low=-self.f_opts["bound_translation"],
+                                         high=self.f_opts["bound_translation"], size=(1, 2))
 
-                # sample scaling
-                s = self.rng.uniform(low=1 - self.f_opts["bound_scaling"], high=1 + self.f_opts["bound_scaling"])
+                    # sample scaling
+                    s = self.rng.uniform(low=1 - self.f_opts["bound_scaling"], high=1 + self.f_opts["bound_scaling"])
+                elif "translation_min" in self.f_opts:
+                    # sample translation
+                    t = self.rng.uniform(low=self.f_opts["translation_min"],
+                                         high=self.f_opts["translation_max"], size=(1, 2))
+                    # sample signs of translation
+                    for i in range(t.shape[1]):
+                        coin = self.rng.uniform(low=0.0, high=1.0)
+                        if coin > 0.5:
+                            t[0, i] = -t[0, i]
+
+                    # sample scaling
+                    s = self.rng.uniform(low=self.f_opts["scaling_min"], high=self.f_opts["scaling_max"])
+                else:
+                    raise ValueError("Missspecified translation/scaling parameters!")
 
             self.f = lambda x: gprice_var(x, t=t, s=s)
 
@@ -312,12 +366,27 @@ class MetaBO(gym.Env):
                 t = fct_params_grid[param_idx, 0:3]
                 s = fct_params_grid[param_idx, 3]
             else:
-                # sample translation
-                t = self.rng.uniform(low=-self.f_opts["bound_translation"],
-                                     high=self.f_opts["bound_translation"], size=(1, 3))
+                if "bound_translation" in self.f_opts:
+                    # sample translation
+                    t = self.rng.uniform(low=-self.f_opts["bound_translation"],
+                                         high=self.f_opts["bound_translation"], size=(1, 3))
 
-                # sample scaling
-                s = self.rng.uniform(low=1 - self.f_opts["bound_scaling"], high=1 + self.f_opts["bound_scaling"])
+                    # sample scaling
+                    s = self.rng.uniform(low=1 - self.f_opts["bound_scaling"], high=1 + self.f_opts["bound_scaling"])
+                elif "translation_min" in self.f_opts:
+                    # sample translation
+                    t = self.rng.uniform(low=self.f_opts["translation_min"],
+                                         high=self.f_opts["translation_max"], size=(1, 3))
+                    # sample signs of translation
+                    for i in range(t.shape[1]):
+                        coin = self.rng.uniform(low=0.0, high=1.0)
+                        if coin > 0.5:
+                            t[0, i] = -t[0, i]
+
+                    # sample scaling
+                    s = self.rng.uniform(low=self.f_opts["scaling_min"], high=self.f_opts["scaling_max"])
+                else:
+                    raise ValueError("Missspecified translation/scaling parameters!")
 
             self.f = lambda x: hm3_var(x, t=t, s=s)
 
@@ -419,6 +488,48 @@ class MetaBO(gym.Env):
             self.x_max = scale_from_domain_to_unit_square(lqr_params, furuta_domain).reshape(1, self.D)
             self.y_max = self.f(self.x_max)
             self.y_min = -5.0  # = -log(chrashcost)
+        elif self.f_type == "RHINO":
+            # use a discrete domain
+            self.xi_t = np.linspace(0.0, 1.0, self.f_opts["cardinality_domain"]).reshape(
+                self.f_opts["cardinality_domain"], self.D)
+            assert self.xi_t.shape[0] == self.cardinality_xi_t
+
+            # sample translation
+            t = self.rng.uniform(low=-self.f_opts["bound_translation"],
+                                 high=self.f_opts["bound_translation"], size=(1, 1))
+
+            self.f = lambda x: rhino_translated(x=x, t=t)
+
+            max_pos, max, _, min = rhino_max_min_translated(t=t)
+            self.x_max = max_pos
+            self.y_max = max
+            self.y_min = min
+
+            # y = self.f(self.xi_t)
+            # self.x_max = self.xi_t[np.argmax(y)]
+            # self.y_max = np.max(y)
+            # self.y_min = np.min(y)
+        elif self.f_type == "RHINO2":
+            # use a discrete domain
+            self.xi_t = np.linspace(0.0, 1.0, self.f_opts["cardinality_domain"]).reshape(
+                self.f_opts["cardinality_domain"], self.D)
+            assert self.xi_t.shape[0] == self.cardinality_xi_t
+
+            # sample translation
+            h = self.rng.uniform(low=self.f_opts["h_min"],
+                                 high=self.f_opts["h_max"], size=(1, 1))
+
+            self.f = lambda x: rhino2(x=x, h=h)
+
+            max_pos, max, _, min = rhino2_max_min(h=h)
+            self.x_max = max_pos
+            self.y_max = max
+            self.y_min = min
+
+            # y = self.f(self.xi_t)
+            # self.x_max = self.xi_t[np.argmax(y)]
+            # self.y_max = np.max(y)
+            # self.y_min = np.min(y)
         else:
             raise ValueError("Unknown f_type!")
 
@@ -430,10 +541,22 @@ class MetaBO(gym.Env):
         self.X = self.Y = None
 
         # reset gp
-        self.kernel = GPy.kern.RBF(input_dim=self.D,
-                                   variance=self.kernel_variance,
-                                   lengthscale=self.kernel_lengthscale,
-                                   ARD=True)
+        if "kernel" in self.kwargs:
+            if self.kwargs["kernel"] == "RBF":
+                kernel_fun = GPy.kern.RBF
+            elif self.kwargs["kernel"] == "Matern32":
+                kernel_fun = GPy.kern.Matern32
+            elif self.kwargs["kernel"] == "Matern52":
+                kernel_fun = GPy.kern.Matern52
+            else:
+                raise ValueError("Unknown kernel function for GP model!")
+        else:
+            kernel_fun = GPy.kern.RBF
+
+        self.kernel = kernel_fun(input_dim=self.D,
+                                 variance=self.kernel_variance,
+                                 lengthscale=self.kernel_lengthscale,
+                                 ARD=True)
 
         if self.use_prior_mean_function:
             self.mf = GPy.core.Mapping(self.D, 1)
@@ -456,8 +579,8 @@ class MetaBO(gym.Env):
                                                         mean_function=self.mf,
                                                         normalizer=normalizer)
         self.gp.Gaussian_noise.variance = self.noise_variance
-        self.gp.rbf.lengthscale = self.kernel_lengthscale
-        self.gp.rbf.variance = self.kernel_variance
+        self.gp.kern.lengthscale = self.kernel_lengthscale
+        self.gp.kern.variance = self.kernel_variance
 
     def add_data(self, X):
         assert X.ndim == 2
@@ -511,14 +634,29 @@ class MetaBO(gym.Env):
             incumbent_vec = np.ones((X.shape[0],)) * self.get_incumbent()
             state[:, idx] = incumbent_vec
             idx += 1
+        if "timestep_perc" in self.features:
+            feature_count += 1
+            t_perc = self.t / self.T
+            t_perc_vec = np.ones((X.shape[0],)) * t_perc
+            state[:, idx] = t_perc_vec
+            idx += 1
         if "timestep" in self.features:
             feature_count += 1
-            t_vec = np.ones((X.shape[0],)) * self.t
+            # clip timestep
+            if "T_training" in self.kwargs and self.kwargs["T_training"] is not None:
+                t = np.min([self.t, self.kwargs["T_training"]])
+            else:
+                t = self.t
+            t_vec = np.ones((X.shape[0],)) * t
             state[:, idx] = t_vec
             idx += 1
         if "budget" in self.features:
             feature_count += 1
-            budget_vec = np.ones((X.shape[0],)) * (self.T)
+            if "T_training" in self.kwargs and self.kwargs["T_training"] is not None:
+                T = self.kwargs["T_training"]
+            else:
+                T = self.T
+            budget_vec = np.ones((X.shape[0],)) * T
             state[:, idx] = budget_vec
             idx += 1
 
@@ -623,6 +761,69 @@ class MetaBO(gym.Env):
         assert self.is_terminal()
 
         return rewards
+
+    def plot(self):
+        assert self.D == 1 or self.D == 2
+
+        if self.D == 1:
+            width = 2.1
+            height = width / 1.618
+            fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(width, height))
+            fig.subplots_adjust(hspace=0.1)
+            fig.subplots_adjust(left=.04, bottom=.14, right=.96, top=.97)
+
+            # grid for plotting
+            X = np.linspace(0.0, 1.0, 250).reshape(-1, 1)
+
+            # Plot GP, ground truth function, and training set
+            ax = axes[0]
+            # ax.set_title("GP and ground truth function")
+
+            # plot ground truth function and maximum position
+            ax.plot(X, self.f(X), color="k", ls="-", label="objective")
+            ax.axvline(self.x_max, color="r", ls="--", alpha=.5)
+
+            # plot the GP
+            gp_mean, gp_std = self.eval_gp(X)
+            ax.plot(X, gp_mean, "C0", ls="--", label="GP")
+            ax.fill_between(X.squeeze(), gp_mean + gp_std, gp_mean - gp_std, color="C0", alpha=0.2)
+            # ax.plot(X, gp_mean + gp_std, "b--")
+            # ax.plot(X, gp_mean - gp_std, "b--")
+            ax.xaxis.set_ticklabels([])
+            ax.get_yaxis().set_visible(False)
+            ax.set_ylim([-1.5, 1.5])
+            # ax.legend()
+
+            # plot the training set
+            if self.X is not None and self.X.size > 0:
+                ax.scatter(self.X[:-1], self.Y[:-1], color="g", marker="x", s=20)
+                ax.scatter(self.X[-1], self.Y[-1], color="r", marker="x", s=20)
+            # ax.grid()
+
+            # Plot AF
+            ax = axes[1]
+            # ax.set_title("Neural Acquisition Function (MetaBO)")
+
+            # plot the af
+            state = self.get_state(X)
+            af = self.af(state)
+            ax.plot(X, af.reshape(X.shape), color="C0")
+            if self.t >= self.n_init_samples:
+                if self.kwargs.get("local_af_opt"):
+                    for af_max in self.af_maxima_t:
+                        ax.axvline(x=af_max)
+                else:
+                    ax.axvline(x=X[np.argmax(af)], color="r", ls="--", alpha=0.5)
+            ax.yaxis.set_ticklabels([])
+            ax.get_yaxis().set_visible(False)
+            # ax.grid()
+
+        elif self.D == 2:
+            raise NotImplementedError
+
+        fig.savefig(fname=os.path.join(self.kwargs["plotpath"], "plot_{:d}.pdf".format(self.plot_count)))
+        plt.close(fig)
+        self.plot_count += 1
 
     def convert_idx_to_x(self, idx):
         if not isinstance(idx, np.ndarray):

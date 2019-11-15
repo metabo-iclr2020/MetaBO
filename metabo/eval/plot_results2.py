@@ -15,7 +15,8 @@ import numpy as np
 from metabo.eval.evaluate import Result  # for unpickling
 
 
-def plot_results(path, logplot=False):
+def plot_results2(path, logplot=False):
+    # this function corrects for approximate maxima in contrast to plot_results1
     fig, ax = plt.subplots(nrows=1, ncols=1)
 
     # collect results in savepath
@@ -27,6 +28,30 @@ def plot_results(path, logplot=False):
                 results.append(result)
 
     env_id = results[0].env_id
+
+    # determine best final regret to correct for approximate maxima
+    R_best = np.ones((results[0].n_episodes,)) * np.inf
+    for result in results:
+        # prepare rewards_dict
+        rewards_dict = {}
+        for i, rew in enumerate(result.rewards):
+            if isinstance(rew, tuple):
+                t = rew[1]
+                reward = rew[0]
+            else:
+                t = i % result.T + 1
+                reward = rew
+
+            if str(t) in rewards_dict:
+                rewards_dict[str(t)].append(reward)
+            else:
+                rewards_dict[str(t)] = [reward]
+
+        # correct for approximate maxima
+        for i in range(result.n_episodes):
+            cur_R_best = rewards_dict[str(result.T)][i]
+            if cur_R_best < R_best[i]:
+                R_best[i] = cur_R_best
 
     # do the plot
     for result in results:
@@ -44,6 +69,12 @@ def plot_results(path, logplot=False):
                 rewards_dict[str(t)].append(reward)
             else:
                 rewards_dict[str(t)] = [reward]
+
+        # correct for approximate maxima
+        for i in range(result.n_episodes):
+            if R_best[i] < 0:
+                for t in range(1, result.T + 1):
+                    rewards_dict[str(t)][i] += -R_best[i]
 
         t_vec, loc, err_low, err_high = [], [], [], []
         for key, val in rewards_dict.items():
@@ -76,6 +107,5 @@ def plot_results(path, logplot=False):
     ax.set_ylabel("simple regret")
     ax.legend()
 
-    fig.savefig(fname=os.path.join(path, "plot.png"))
+    fig.savefig(fname=os.path.join(path, "plot2.png"))
     plt.close(fig)
-

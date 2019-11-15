@@ -16,14 +16,14 @@ import pickle as pkl
 import torch
 from datetime import datetime
 from collections import namedtuple
-from metabo.policies.policies import NeuralAF, UCB, EI, PI, TAF
+from metabo.policies.policies import NeuralAF, UCB, EI, PI, TAF, EpsGreedy, GMM_UCB
 from metabo.ppo.batchrecorder import BatchRecorder, Transition
 
 Result = namedtuple("Result",
                     "logpath env_id env_specs policy policy_specs deterministic load_iter T n_episodes rewards")
 
 
-def write_overview_logfile(savepath, timestamp, env, env_seeds, policy, taf_datafile=None, verbose=False):
+def write_overview_logfile(savepath, timestamp, env, env_seeds, policy, policy_specs, taf_datafile=None, verbose=False):
     fname = "000_eval_overview_{}.txt".format(policy)
     s = ""
     s += "********* OVERVIEW ENVIRONMENT PARAMETERS *********\n"
@@ -34,6 +34,9 @@ def write_overview_logfile(savepath, timestamp, env, env_seeds, policy, taf_data
     s += "\n"
     s += "Environment-seeds:\n"
     s += str(env_seeds)
+    s += "\n"
+    s += "Policy-specs:\n"
+    s += json.dumps(policy_specs, indent=2)
     if taf_datafile is not None:
         s += "\n"
         s += "TAF-Datafile: {}".format(taf_datafile)
@@ -82,7 +85,7 @@ def eval_experiment(eval_spec):
     timestamp = datetime.strftime(datetime.now(), "%Y-%m-%d-%H-%M-%S")
     taf_datafile = policy_specs["TAF_datafile"] if "TAF_datafile" in policy_specs else None
     write_overview_logfile(savepath=savepath, timestamp=timestamp, env=dummy_env, policy=policy,
-                           env_seeds=env_seeds, taf_datafile=taf_datafile)
+                           env_seeds=env_seeds, taf_datafile=taf_datafile, policy_specs=policy_specs)
     env_specs = dummy_env.spec._kwargs
 
     # prepare the policies
@@ -103,6 +106,15 @@ def eval_experiment(eval_spec):
     elif policy == "PI":
         feature_order = dummy_env.unwrapped.feature_order_eval_envs
         policy_fn = lambda *_: PI(feature_order=feature_order, xi=policy_specs["xi"])
+    elif policy == "EPS-GREEDY":
+        feature_order = dummy_env.unwrapped.feature_order_eps_greedy
+        policy_fn = lambda *_: EpsGreedy(datafile=policy_specs["datafile"], feature_order=feature_order,
+                                         eps=policy_specs["eps"])
+    elif policy == "GMM-UCB":
+        feature_order = dummy_env.unwrapped.feature_order_gmm_ucb
+        policy_fn = lambda *_: GMM_UCB(datafile=policy_specs["datafile"], feature_order=feature_order,
+                                       ucb_kappa=policy_specs["ucb_kappa"], w=policy_specs["w"],
+                                       n_components=policy_specs["n_components"])
     elif policy == "MetaBO":
         load_iter = eval_spec["load_iter"]
         deterministic = eval_spec["deterministic"]

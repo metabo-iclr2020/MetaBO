@@ -17,6 +17,7 @@ from metabo.policies.mlp import MLP
 from scipy.stats import norm
 import pickle as pkl
 import GPy
+from sklearn import mixture
 
 
 class NeuralAF(nn.Module):
@@ -63,7 +64,23 @@ class NeuralAF(nn.Module):
             raise NotImplementedError("Unknown activation function!")
 
         # policy network
-        self.policy_net = MLP(d_in=self.N_features, d_out=1, arch_spec=options["arch_spec"], f_act=f_act)
+        self.N_features_policy = self.N_features
+        if "exclude_t_from_policy" in options:
+            self.exclude_t_from_policy = options["exclude_t_from_policy"]
+            assert "t_idx" in options
+            self.t_idx = options["t_idx"]
+            self.N_features_policy = self.N_features_policy - 1 if self.exclude_t_from_policy else self.N_features_policy
+        else:
+            self.exclude_t_from_policy = False
+        if "exclude_T_from_policy" in options:
+            self.exclude_T_from_policy = options["exclude_T_from_policy"]
+            assert "T_idx" in options
+            self.T_idx = options["T_idx"]
+            self.N_features_policy = self.N_features_policy - 1 if self.exclude_T_from_policy else self.N_features_policy
+        else:
+            self.exclude_T_from_policy = False
+
+        self.policy_net = MLP(d_in=self.N_features_policy, d_out=1, arch_spec=options["arch_spec"], f_act=f_act)
 
         # value network
         if "use_value_network" in options and options["use_value_network"]:
@@ -79,7 +96,12 @@ class NeuralAF(nn.Module):
         assert states.shape[-1] == self.N_features
 
         # policy network
-        logits = self.policy_net.forward(states)
+        mask = [True] * self.N_features
+        if self.exclude_t_from_policy:
+            mask[self.t_idx] = False
+        if self.exclude_T_from_policy:
+            mask[self.T_idx] = False
+        logits = self.policy_net.forward(states[:, :, mask])
         logits.squeeze_(2)
 
         # value network
@@ -131,6 +153,9 @@ class NeuralAF(nn.Module):
     def set_requires_grad(self, requires_grad):
         for p in self.parameters():
             p.requires_grad = requires_grad
+
+    def reset(self):
+        pass
 
     @staticmethod
     def num_flat_features(x):
@@ -194,6 +219,9 @@ class UCB():
     def set_requires_grad(self, flag):
         pass
 
+    def reset(self):
+        pass
+
 
 class EI():
     def __init__(self, feature_order):
@@ -228,6 +256,9 @@ class EI():
     def set_requires_grad(self, flag):
         pass
 
+    def reset(self):
+        pass
+
 
 class PI():
     def __init__(self, feature_order, xi):
@@ -260,6 +291,9 @@ class PI():
         return pis
 
     def set_requires_grad(self, flag):
+        pass
+
+    def reset(self):
         pass
 
 
@@ -418,4 +452,153 @@ class TAF():
         return taf
 
     def set_requires_grad(self, flag):
+        pass
+
+    def reset(self):
+        pass
+
+
+class EpsGreedy():
+    def __init__(self, datafile, eps, feature_order):
+        self.datafile = datafile
+        self.eps = eps
+        if not isinstance(self.eps, str):
+            assert 0.0 <= self.eps <= 1.0
+        else:
+            assert self.eps == "linear_schedule"
+        self.feature_order = feature_order
+        self.best_designs = None  # will be filled in self.determine_best_designs()
+        self.determine_best_designs()
+        self.ei = EI(feature_order=self.feature_order)
+
+    def determine_best_designs(self):
+        with open(self.datafile, "rb") as f:
+            data = pkl.load(f)
+        self.data = data
+
+        self.D = data["D"]
+        self.M = data["M"]
+        self.best_designs = []
+        for i in range(self.M):
+            best_value_idx = np.argmax(data["Y"][i], axis=0)
+            self.best_designs.append(data["X"][i][best_value_idx])
+        self.best_designs = np.array(self.best_designs).squeeze()
+
+    def act(self, state):
+        state = state.numpy()
+        af = self.af(state)
+        action = np.random.choice(np.flatnonzero(af == af.max()))
+        value = 0.0
+
+        action = torch.tensor([action], dtype=torch.int64)
+        value = torch.tensor([value])
+        return action.squeeze(0), value.squeeze(0)
+
+    def af(self, state):
+        t_idx = self.feature_order.index("timestep")
+        t = int(state[0, t_idx])
+
+        # throw T coins to determine at which steps to be greedy and the corresponding designs to choose
+        if self.is_reset:
+            self.is_reset = False
+
+            assert t == 0
+
+            T_idx = self.feature_order.index("budget")
+            T = int(state[0, T_idx])
+
+            # the af is evaluated at most T+1 times to get its state after T steps also
+            self.coins = np.random.rand(T + 1)
+            if self.eps != "linear_schedule":
+                self.be_greedy = self.coins < self.eps
+            else:
+                self.eps = np.linspace(1.0, 0.0, T + 1)
+                self.be_greedy = [self.coins[i] < self.eps[i] for i in range(T + 1)]
+            n_greedy_steps = np.sum(self.be_greedy)
+            np.random.shuffle(self.best_designs)
+            self.episode_best_designs = np.ones((T + 1, self.D)) * np.nan
+            self.episode_best_designs[self.be_greedy, :] = self.best_designs[:n_greedy_steps, :] \
+                if n_greedy_steps < self.M else self.best_designs[:, :]
+
+        if not self.be_greedy[t]:
+            af = self.ei.af(state)
+        else:
+            chosen_design = self.episode_best_designs[t]
+            assert not np.isnan(chosen_design).any()
+            x_idx = self.feature_order.index("x")  # returns index of first occurence
+            x = state[:, x_idx:x_idx + self.D]
+            # return the negative norm of the vector difference between chosen design and all x values to choose from
+            # to make sure that only x-values in the domain can be chosen
+            af = -np.linalg.norm(x - chosen_design, axis=1)
+        return af
+
+    def set_requires_grad(self, flag):
+        pass
+
+    def reset(self):
+        self.is_reset = True
+
+
+class GMM_UCB():
+    def __init__(self, datafile, w, n_components, ucb_kappa, feature_order):
+        self.datafile = datafile
+        self.w = w
+        self.n_components = n_components
+        if not isinstance(self.w, str):
+            assert 0.0 <= self.w <= 1.0
+        else:
+            assert self.w == "linear_schedule"
+        self.feature_order = feature_order
+        self.ucb = UCB(feature_order=self.feature_order, kappa=ucb_kappa)
+        self.best_designs = None  # will be filled in self.determine_best_designs()
+        self.determine_best_designs()
+        self.fit_gmm()
+
+    def determine_best_designs(self):
+        with open(self.datafile, "rb") as f:
+            data = pkl.load(f)
+        self.data = data
+
+        self.D = data["D"]
+        self.M = data["M"]
+        self.best_designs = []
+        for i in range(self.M):
+            best_value_idx = np.argmax(data["Y"][i], axis=0)
+            self.best_designs.append(data["X"][i][best_value_idx])
+        self.best_designs = np.array(self.best_designs).squeeze()
+
+    def fit_gmm(self):
+        self.gmm = mixture.GaussianMixture(n_components=self.n_components)
+        self.gmm.fit(self.best_designs)
+
+    def act(self, state):
+        state = state.numpy()
+        af = self.af(state)
+        action = np.random.choice(np.flatnonzero(af == af.max()))
+        value = 0.0
+
+        action = torch.tensor([action], dtype=torch.int64)
+        value = torch.tensor([value])
+        return action.squeeze(0), value.squeeze(0)
+
+    def af(self, state):
+        x_idx = self.feature_order.index("x")
+        t_idx = self.feature_order.index("timestep")
+        T_idx = self.feature_order.index("budget")
+        x = state[:, x_idx:x_idx + self.D]
+        t = state[0, t_idx]
+        T = state[0, T_idx]
+        ucb = self.ucb.af(state)
+        gmm = self.gmm.score_samples(x)
+        if self.w != "linear_schedule":
+            w = self.w
+        else:
+            w = 1.0 - t / T
+        af = w * gmm + (1 - w) * ucb
+        return af
+
+    def set_requires_grad(self, flag):
+        pass
+
+    def reset(self):
         pass

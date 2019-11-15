@@ -6,7 +6,7 @@ import sobol_seq
 import pickle as pkl
 
 
-def generate_taf_data_gprice(M):
+def generate_taf_data_gprice(M, N):
     # dimension of task
     D = 2
 
@@ -22,7 +22,6 @@ def generate_taf_data_gprice(M):
 
     # generate grid of control parameters
     # number of parameter configurations
-    N = 100
     input_grid = sobol_seq.i4_sobol_generate(dim_num=D, n=N)
 
     # generate data

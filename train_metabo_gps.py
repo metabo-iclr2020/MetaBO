@@ -21,37 +21,39 @@ from gym.envs.registration import register
 rootdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "metabo")
 
 # specifiy environment
+kernel = "Matern52"
 env_spec = {
     "env_id": "MetaBO-GP-v0",
-    "D": 5,
+    "D": 3,
     "f_type": "GP",
-    "f_opts": {"lengthscale_low": 0.1,
-               "lengthscale_high": 1.0,
+    "f_opts": {"kernel": kernel,
+               "lengthscale_low": 0.05,
+               "lengthscale_high": 0.5,
                "noise_var_low": 0.1,
                "noise_var_high": 0.1,
                "signal_var_low": 1.0,
-               "signal_var_high": 1.0},
-    "features": ["posterior_mean", "posterior_std", "timestep", "budget"],
-    "T": 50,
+               "signal_var_high": 1.0,
+               "min_regret": 1e-6},
+    "features": ["posterior_mean", "posterior_std", "incumbent", "timestep_perc", "timestep", "budget"],
+    "T": 30,
     "n_init_samples": 0,
     "pass_X_to_pi": False,
     # will be set individually for each new function to the sampled hyperparameters
+    "kernel": kernel,
     "kernel_lengthscale": None,
     "kernel_variance": None,
     "noise_variance": None,
     "use_prior_mean_function": True,
-    "local_af_opt": True,
-    "N_MS": 5000,
-    "N_LS": 5000,
-    "k": 5,
-    "reward_transformation": "neg_linear"  # true maximum not known
+    "local_af_opt": False,
+    "cardinality_domain": 2000,
+    "reward_transformation": "neg_log10"  # true maximum not known
 }
 
 # specify PPO parameters
 n_iterations = 2000
 batch_size = 1200
 n_workers = 10
-arch_spec = 4 * [200]
+arch_spec = 2 * [20]
 ppo_spec = {
     "batch_size": batch_size,
     "max_steps": n_iterations * batch_size,
@@ -72,6 +74,8 @@ ppo_spec = {
     "policy_options": {
         "activations": "relu",
         "arch_spec": arch_spec,
+        "exclude_t_from_policy": True,
+        "exclude_T_from_policy": True,
         "use_value_network": True,
         "t_idx": -2,
         "T_idx": -1,

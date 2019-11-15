@@ -18,7 +18,7 @@ from gym.envs.registration import register, registry
 from datetime import datetime
 
 # set evaluation parameters
-afs_to_evaluate = ["MetaBO", "TAF-ME", "TAF-RANKING", "EI", "GP-UCB"]
+afs_to_evaluate = ["MetaBO", "TAF-ME", "TAF-RANKING", "EI"]
 rootdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "metabo")
 logpath = os.path.join(rootdir, "iclr2020", "furuta", "full", "MetaBO-Furuta-v0")
 savepath = os.path.join(logpath, "eval", datetime.strftime(datetime.now(), "%Y-%m-%d-%H-%M-%S"))
@@ -35,7 +35,7 @@ for af in afs_to_evaluate:
         load_iter = 1405  # best ppo iteration during training, determined via metabo/ppo/util/get_best_iter_idx
         deterministic = True
         policy_specs = {}  # will be loaded from the logfiles
-    elif af == "TAF-ME" or "TAF-RANKING":
+    elif af == "TAF-ME" or af == "TAF-RANKING":
         generate_taf_data_furuta(M=100)
         features = ["posterior_mean", "posterior_std", "incumbent", "timestep", "x"]
         pass_X_to_pi = True

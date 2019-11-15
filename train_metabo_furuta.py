@@ -85,7 +85,7 @@ ppo_spec = {
     "policy_options": {
         "activations": "relu",
         "arch_spec": arch_spec,
-        "use_value_network": False,
+        "use_value_network": True,
         "t_idx": -2,
         "T_idx": -1,
         "arch_spec_value": arch_spec

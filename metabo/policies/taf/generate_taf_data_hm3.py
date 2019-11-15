@@ -6,7 +6,7 @@ import sobol_seq
 import pickle as pkl
 
 
-def generate_taf_data_hm3(M):
+def generate_taf_data_hm3(M, N):
     # dimension of task
     D = 3
 
@@ -23,7 +23,6 @@ def generate_taf_data_hm3(M):
 
     # generate grid of control parameters
     # number of parameter configurations
-    N = 100
     input_grid = sobol_seq.i4_sobol_generate(dim_num=D, n=N)
 
     # generate data
